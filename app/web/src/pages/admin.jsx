@@ -362,6 +362,58 @@ export function Modules() {
   )
 }
 
+export function Versions() {
+  const [rows, setRows] = useState([])
+  const [editTarget, setEditTarget] = useState(null)
+  const [form] = Form.useForm()
+
+  const load = () => api.get('/versions', { params: { all: true } }).then(setRows).catch((e) => message.error(e.message))
+  useEffect(() => { load() }, [])
+
+  const openEdit = (record) => {
+    setEditTarget(record || {})
+    form.setFieldsValue(record ? { name: record.name, status: record.status === '启用' } : { name: '', status: true })
+  }
+
+  const submit = async () => {
+    const values = await form.validateFields()
+    const payload = { name: values.name, status: values.status ? '启用' : '停用' }
+    try {
+      if (editTarget && editTarget.id) await api.put(`/admin/versions/${editTarget.id}`, payload)
+      else await api.post('/admin/versions', payload)
+      message.success('已保存')
+      setEditTarget(null)
+      load()
+    } catch (e) { message.error(e.message) }
+  }
+
+  return (
+    <div>
+      <Alert style={{ marginBottom: 16 }} type="info" showIcon
+        message="维护产品版本号。需求池中将需求流转为「已排期」时必须选择一个启用中的版本号；已停用的版本号不可再被选择，但不影响已排期需求的显示。" />
+      <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 12 }} onClick={() => openEdit(null)}>新增版本号</Button>
+      <Table rowKey="id" dataSource={rows} pagination={false}
+        columns={[
+          { title: '版本号', dataIndex: 'name' },
+          { title: '状态', dataIndex: 'status', render: (v) => <Tag color={v === '启用' ? 'success' : 'default'}>{v}</Tag> },
+          { title: '创建时间', dataIndex: 'created_at' },
+          { title: '操作', render: (_, r) => <Button size="small" onClick={() => openEdit(r)}>编辑</Button> },
+        ]} />
+      <Modal title={editTarget && editTarget.id ? '编辑版本号' : '新增版本号'} open={!!editTarget} onOk={submit}
+        onCancel={() => setEditTarget(null)} destroyOnClose>
+        <Form form={form} layout="vertical">
+          <Form.Item name="name" label="版本号" rules={[{ required: true }]}>
+            <Input placeholder="如：V1.0、2026.09" />
+          </Form.Item>
+          <Form.Item name="status" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
+  )
+}
+
 export function MaskingWords() {
   const [rows, setRows] = useState([])
   const [word, setWord] = useState('')

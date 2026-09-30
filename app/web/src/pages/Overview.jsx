@@ -3,7 +3,7 @@ import { Card, Col, Row, Statistic, Table, Tag, Typography } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
 
-const STATUS_LABELS = { confirmed: '已确认', assessing: '评估中', scheduled: '已排期', released: '已上线', rejected: '已拒绝' }
+const STATUS_LABELS = { confirmed: '已确认', assessing: '评估中', scheduled: '已排期', developing: '开发中', released: '已上线', rejected: '已拒绝' }
 const TYPE_COLORS = { 新需求: 'blue', 体验优化: 'orange', 缺陷反馈: 'red' }
 
 export default function Overview() {

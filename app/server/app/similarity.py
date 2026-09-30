@@ -2,7 +2,7 @@ import difflib
 
 from . import db, llm
 
-OPEN_STATUSES = ("confirmed", "assessing", "scheduled")
+OPEN_STATUSES = ("confirmed", "assessing", "scheduled", "developing")
 
 
 def _ratio(a, b):

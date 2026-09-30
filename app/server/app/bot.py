@@ -12,7 +12,7 @@ HELP_TEXT = (
     "1. 直接把需求以文字发给我，我会自动整理后请你确认；\n"
     "2. 整理完成后请在「需求搜集智能工作台 → 待确认收件箱」中确认，处理结果会私信通知您；\n"
     "3. 需求上线后也会第一时间通知您；\n"
-    "4. 本期暂支持文字提报。"
+    "4. 支持图片及 Word/PDF/Excel 附件，附件随需求一并入池（附件内容不做分析）。"
 )
 
 _adapter = None
@@ -170,7 +170,10 @@ class WeComBotAdapter:
         self.client.on("authenticated", lambda: (set_connected(True), _log_conn("authenticated")))
         self.client.on("disconnected", lambda reason: (set_connected(False), _log_conn("disconnected", reason)))
         self.client.on("message.text", self._on_text)
-        for event in ("message.image", "message.voice", "message.file", "message.video", "message.mixed"):
+        self.client.on("message.image", self._on_image)
+        self.client.on("message.file", self._on_file)
+        self.client.on("message.mixed", self._on_mixed)
+        for event in ("message.voice", "message.video"):
             self.client.on(event, self._on_non_text)
         self.client.on("event.enter_chat", self._on_enter_chat)
         self.client.on("event.template_card_event", self._on_card_event)
@@ -205,6 +208,81 @@ class WeComBotAdapter:
         body = frame.get("body") or {}
         user = resolve_user_name(self._sender_id(frame))
         self._run_pipeline(pipeline.handle_non_text, user, body.get("msgtype", "unknown"))
+
+    def _on_image(self, frame):
+        self._on_media(frame, "image")
+
+    def _on_file(self, frame):
+        self._on_media(frame, "file")
+
+    def _on_media(self, frame, media_type):
+        _log_frame(frame)
+        body = frame.get("body") or {}
+        media = body.get(media_type) or {}
+        url = media.get("url")
+        if not url:
+            return
+        aeskey = media.get("aeskey") or media.get("aes_key")
+        name = media.get("name") or media.get("filename")
+        user = resolve_user_name(self._sender_id(frame))
+        chat_id = self._chat_id(frame)
+        self._download_and_dispatch(user, chat_id, media_type, url, aeskey, name)
+
+    def _on_mixed(self, frame):
+        """图文混合消息：文字进入需求分析，图片/文件存为附件。"""
+        from . import pipeline
+
+        _log_frame(frame)
+        body = frame.get("body") or {}
+        mixed = body.get("mixed") or {}
+        items = mixed.get("msg_item") or []
+        if not items:
+            return
+        user = resolve_user_name(self._sender_id(frame))
+        chat_id = self._chat_id(frame)
+        texts = []
+        for item in items:
+            itype = item.get("msgtype")
+            if itype == "text":
+                content = _strip_mention((item.get("text") or {}).get("content", ""))
+                if content:
+                    texts.append(content)
+        if texts:
+            self._run_pipeline(pipeline.handle_incoming, user, "\n".join(texts), "wecom", chat_id)
+        for item in items:
+            itype = item.get("msgtype")
+            if itype in ("image", "file"):
+                media = item.get(itype) or {}
+                url = media.get("url")
+                if url:
+                    self._download_and_dispatch(
+                        user, chat_id, itype, url,
+                        media.get("aeskey") or media.get("aes_key"),
+                        media.get("name") or media.get("filename"),
+                    )
+
+    def _download_and_dispatch(self, user, chat_id, media_type, url, aeskey, name):
+        from . import pipeline
+
+        async def _download():
+            return await self.client.download_file(url, aeskey)
+
+        future = asyncio.run_coroutine_threadsafe(_download(), self._loop)
+
+        def _done(fut):
+            data, fname = None, name
+            try:
+                result = fut.result() or {}
+                data = result.get("buffer")
+                fname = fname or result.get("filename")
+            except Exception as exc:
+                print("[bot] 附件下载失败:", exc)
+            if not data:
+                self._loop.run_in_executor(None, pipeline.handle_non_text, user, media_type)
+                return
+            self._loop.run_in_executor(None, pipeline.handle_attachment, user, media_type, fname, data, "wecom", chat_id)
+
+        future.add_done_callback(_done)
 
     def _on_enter_chat(self, frame):
         async def _welcome():

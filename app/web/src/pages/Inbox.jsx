@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import {
   Button, DatePicker, Drawer, Form, Input, Modal, Popconfirm, Select, Space,
-  Table, Tabs, Tag, Typography, message,
+  Table, Tabs, Tag, Typography, Upload, message,
 } from 'antd'
-import api from '../api'
+import { PlusOutlined } from '@ant-design/icons'
+import api, { AI_TIMEOUT } from '../api'
+import { getUser } from '../store'
+import AttachmentList from '../components/AttachmentList'
 
 const TYPE_COLORS = { 新需求: 'blue', 体验优化: 'orange', 缺陷反馈: 'red' }
 
@@ -25,6 +28,40 @@ export default function Inbox() {
   const [modules, setModules] = useState([])
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [detail, setDetail] = useState(null)
+  const user = getUser() || {}
+  const canManage = user.role === 'leader' || user.role === 'admin'
+
+  const reloadDetail = async () => {
+    if (detail) setDetail(await api.get(`/inbox/${detail.id}`))
+  }
+
+  const removeAttachment = async (att) => {
+    try {
+      await api.delete(`/attachments/${att.id}`)
+      message.success('附件已删除')
+      reloadDetail()
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
+
+  const attachmentUploadProps = {
+    showUploadList: false,
+    accept: '.png,.jpg,.jpeg,.gif,.bmp,.webp,.docx,.pdf,.xlsx,.xls,.csv,.txt,.md',
+    customRequest: async ({ file, onSuccess, onError }) => {
+      const form = new FormData()
+      form.append('file', file)
+      try {
+        await api.post(`/inbox/${detail.id}/attachments`, form)
+        message.success('附件已添加')
+        onSuccess()
+        reloadDetail()
+      } catch (e) {
+        message.error(e.message)
+        onError(e)
+      }
+    },
+  }
   const [editCard, setEditCard] = useState(null)
   const [form] = Form.useForm()
 
@@ -83,7 +120,7 @@ export default function Inbox() {
   const doReextract = async (card) => {
     setReextractingId(card.id)
     try {
-      const r = await api.post(`/inbox/${card.id}/reextract`)
+      const r = await api.post(`/inbox/${card.id}/reextract`, null, { timeout: AI_TIMEOUT })
       message.success(`重新提炼成功：${r.title}`)
       load()
     } catch (e) { message.error(e.message) } finally { setReextractingId(null) }
@@ -210,6 +247,17 @@ export default function Inbox() {
             <Typography.Paragraph type="secondary" style={{ whiteSpace: 'pre-wrap', background: '#fafafa', padding: 12 }}>
               {detail.masked_text}
             </Typography.Paragraph>
+            <Typography.Title level={5}>
+              附件（{(detail.attachments || []).length}/10）
+              {(detail.attachments || []).length < 10 && (
+                <Upload {...attachmentUploadProps}>
+                  <Button size="small" type="link" icon={<PlusOutlined />}>新增附件</Button>
+                </Upload>
+              )}
+            </Typography.Title>
+            {(detail.attachments || []).length > 0 && (
+              <AttachmentList attachments={detail.attachments} canManage={canManage} onRemove={removeAttachment} />
+            )}
             {detail.similar && (
               <Typography.Paragraph type="warning">
                 待合并决策：相似需求 {detail.similar.req_no} {detail.similar.title}

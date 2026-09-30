@@ -21,6 +21,11 @@ SCHEMA = [
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
         status TEXT NOT NULL DEFAULT '启用')""",
+    """CREATE TABLE IF NOT EXISTS versions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        status TEXT NOT NULL DEFAULT '启用',
+        created_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS masking_words(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         word TEXT UNIQUE NOT NULL)""",
@@ -115,6 +120,15 @@ SCHEMA = [
         msg_type TEXT DEFAULT 'text',
         content TEXT,
         created_at TEXT)""",
+    """CREATE TABLE IF NOT EXISTS attachments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user TEXT,
+        msg_type TEXT,
+        filename TEXT,
+        stored_name TEXT,
+        size INTEGER DEFAULT 0,
+        card_id INTEGER,
+        created_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS wecom_contacts(
         wecom_userid TEXT PRIMARY KEY,
         name TEXT NOT NULL DEFAULT '',
@@ -178,6 +192,13 @@ def log_bot_message(direction, user, msg_type, content):
     )
 
 
+def save_attachment(user, msg_type, filename, stored_name, size, card_id=None, requirement_id=None):
+    return execute(
+        "INSERT INTO attachments(user,msg_type,filename,stored_name,size,card_id,requirement_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (user, msg_type, filename, stored_name, size, card_id, requirement_id, now()),
+    )
+
+
 def record_contact(userid):
     if not userid or userid == "unknown":
         return
@@ -200,6 +221,14 @@ def init_db():
         buf_cols = [r[1] for r in conn.execute("PRAGMA table_info(buffers)").fetchall()]
         if "chat_id" not in buf_cols:
             conn.execute("ALTER TABLE buffers ADD COLUMN chat_id TEXT")
+        att_cols = [r[1] for r in conn.execute("PRAGMA table_info(attachments)").fetchall()]
+        if "requirement_id" not in att_cols:
+            conn.execute("ALTER TABLE attachments ADD COLUMN requirement_id INTEGER")
+        if "card_id" not in att_cols:
+            conn.execute("ALTER TABLE attachments ADD COLUMN card_id INTEGER")
+        req_cols = [r[1] for r in conn.execute("PRAGMA table_info(requirements)").fetchall()]
+        if "version_id" not in req_cols:
+            conn.execute("ALTER TABLE requirements ADD COLUMN version_id INTEGER")
         conn.commit()
     for key, value in DEFAULT_CONFIGS.items():
         if query_one("SELECT key FROM configs WHERE key=?", (key,)) is None:

@@ -14,7 +14,7 @@ import RequirementPool from './pages/RequirementPool'
 import Broadcasts from './pages/Broadcasts'
 import Stats from './pages/Stats'
 import BotSimulator from './pages/BotSimulator'
-import { Members, Contacts, BotConfig, ModelConfig, BroadcastConfig, Modules, MaskingWords, AiLogs } from './pages/admin'
+import { Members, Contacts, BotConfig, ModelConfig, BroadcastConfig, Modules, Versions, MaskingWords, AiLogs } from './pages/admin'
 
 const { Sider, Header, Content } = Layout
 
@@ -46,6 +46,7 @@ function AdminLayout() {
           { key: '/admin/model', label: '模型配置' },
           { key: '/admin/broadcast', label: '播报配置' },
           { key: '/admin/modules', label: '模块配置' },
+          { key: '/admin/versions', label: '版本配置' },
           { key: '/admin/masking', label: '脱敏配置' },
           { key: '/admin/logs', label: 'AI 调用日志' },
         ],
@@ -106,6 +107,7 @@ export default function App() {
             <Route path="/admin/model" element={<ModelConfig />} />
             <Route path="/admin/broadcast" element={<BroadcastConfig />} />
             <Route path="/admin/modules" element={<Modules />} />
+            <Route path="/admin/versions" element={<Versions />} />
             <Route path="/admin/masking" element={<MaskingWords />} />
             <Route path="/admin/logs" element={<AiLogs />} />
           </Route>

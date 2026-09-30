@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from . import broadcast, bot as bot_module, db, pipeline, security, wecom_api
@@ -209,6 +209,40 @@ def update_module(mid: int, body: ModuleBody, user=Depends(admin_only)):
     return {"ok": True}
 
 
+@router.get("/versions")
+def list_versions(all: bool = False, user=Depends(current_user)):
+    if all:
+        return db.query("SELECT * FROM versions ORDER BY id")
+    return db.query("SELECT * FROM versions WHERE status='启用' ORDER BY id")
+
+
+class VersionBody(BaseModel):
+    name: str
+    status: str = "启用"
+
+
+@router.post("/admin/versions")
+def create_version(body: VersionBody, user=Depends(admin_only)):
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="版本号不能为空")
+    if db.query_one("SELECT id FROM versions WHERE name=?", (body.name.strip(),)):
+        raise HTTPException(status_code=400, detail="版本号已存在")
+    return {"ok": True, "id": db.execute("INSERT INTO versions(name,status,created_at) VALUES(?,?,?)", (body.name.strip(), body.status, db.now()))}
+
+
+@router.put("/admin/versions/{vid}")
+def update_version(vid: int, body: VersionBody, user=Depends(admin_only)):
+    if not db.query_one("SELECT id FROM versions WHERE id=?", (vid,)):
+        raise HTTPException(status_code=404, detail="版本号不存在")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="版本号不能为空")
+    dup = db.query_one("SELECT id FROM versions WHERE name=? AND id != ?", (body.name.strip(), vid))
+    if dup:
+        raise HTTPException(status_code=400, detail="版本号已存在")
+    db.execute("UPDATE versions SET name=?, status=? WHERE id=?", (body.name.strip(), body.status, vid))
+    return {"ok": True}
+
+
 @router.get("/admin/masking-words")
 def list_masking_words(user=Depends(admin_only)):
     return db.query("SELECT * FROM masking_words ORDER BY id")
@@ -304,6 +338,17 @@ def simulate_message(body: SimulateBody, user=Depends(current_user)):
             raise HTTPException(status_code=400, detail="消息内容不能为空")
         pipeline.handle_incoming(body.user, body.text)
     return {"ok": True}
+
+
+@router.post("/simulate/file")
+async def simulate_file(user_name: str = Form("王雁"), file: UploadFile = File(...), user=Depends(current_user)):
+    data = await file.read()
+    ext = (file.filename or "").lower()
+    msg_type = "image" if any(ext.endswith(e) for e in pipeline.IMAGE_EXTS) else "file"
+    ok, msg = pipeline.handle_attachment(user_name, msg_type, file.filename, data, "mock")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "message": msg}
 
 
 @router.get("/simulate/messages")

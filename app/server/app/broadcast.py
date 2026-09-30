@@ -41,7 +41,7 @@ def build_weekly_content(biz_date):
     top = db.query(
         "SELECT req_no,title,freq FROM requirements ORDER BY freq DESC, updated_at DESC LIMIT 5"
     )
-    trans = {s: 0 for s in ("assessing", "scheduled", "released")}
+    trans = {s: 0 for s in ("assessing", "scheduled", "developing", "released")}
     for row in db.query(
         "SELECT to_status, COUNT(*) AS c FROM transitions WHERE created_at >= ? AND created_at <= ? GROUP BY to_status",
         (start + " 00:00:00", end + " 23:59:59"),
@@ -62,7 +62,7 @@ def build_weekly_content(biz_date):
         lines.append("提出次数 Top5：")
         for i, r in enumerate(top, 1):
             lines.append("%d. %s %s（%d 次）" % (i, r["req_no"], r["title"], r["freq"]))
-    lines.append("状态流转：评估中 %d，已排期 %d，已上线 %d" % (trans["assessing"], trans["scheduled"], trans["released"]))
+    lines.append("状态流转：评估中 %d，已排期 %d，开发中 %d，已上线 %d" % (trans["assessing"], trans["scheduled"], trans["developing"], trans["released"]))
     return "\n".join(lines)
 
 

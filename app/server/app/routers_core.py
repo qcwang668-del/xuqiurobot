@@ -1,12 +1,14 @@
 import csv
 import io
 import json
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import bot as bot_module, db, pipeline, security
+from .config import DATA_DIR
 from .deps import current_user, require_roles
 
 router = APIRouter(prefix="/api")
@@ -116,7 +118,20 @@ def inbox_detail(card_id: int, user=Depends(current_user)):
     if card.get("similar_requirement_id"):
         card["similar"] = db.query_one("SELECT id,req_no,title,status FROM requirements WHERE id=?", (card["similar_requirement_id"],))
     _attach_display_names([card])
+    card["attachments"] = db.query(
+        "SELECT id,user,msg_type,filename,size,created_at FROM attachments WHERE card_id=? ORDER BY id",
+        (card_id,),
+    )
     return card
+
+
+@router.post("/inbox/{card_id}/attachments")
+async def upload_card_attachment(card_id: int, file: UploadFile = File(...), user=Depends(current_user)):
+    data = await file.read()
+    ok, msg = pipeline.save_card_attachment(user["name"], card_id, file.filename, data)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "message": msg}
 
 
 class ConfirmBody(BaseModel):
@@ -201,7 +216,7 @@ def inbox_restore(card_id: int, user=Depends(current_user)):
 
 @router.get("/requirements")
 def requirements(keyword: str = "", module_id: int = 0, req_type: str = "", status: str = "",
-                 urgency: str = "", source: str = "", created_by: str = "",
+                 urgency: str = "", source: str = "", created_by: str = "", version_id: int = 0,
                  date_from: str = "", date_to: str = "", sort: str = "updated_at",
                  order: str = "desc", page: int = 1, size: int = 20, user=Depends(current_user)):
     cond = ["1=1"]
@@ -216,14 +231,22 @@ def requirements(keyword: str = "", module_id: int = 0, req_type: str = "", stat
         cond.append("r.req_type=?")
         args.append(req_type)
     if status:
-        cond.append("r.status=?")
-        args.append(status)
+        status_list = [s.strip() for s in status.split(",") if s.strip()]
+        if len(status_list) == 1:
+            cond.append("r.status=?")
+            args.append(status_list[0])
+        elif status_list:
+            cond.append("r.status IN (" + ",".join("?" * len(status_list)) + ")")
+            args += status_list
     if urgency:
         cond.append("r.urgency=?")
         args.append(urgency)
     if source:
         cond.append("r.source_objects LIKE ?")
         args.append("%" + source + "%")
+    if version_id:
+        cond.append("r.version_id=?")
+        args.append(version_id)
     if created_by:
         cond.append("r.created_by=?")
         args.append(created_by)
@@ -238,8 +261,9 @@ def requirements(keyword: str = "", module_id: int = 0, req_type: str = "", stat
     direction = "ASC" if order == "asc" else "DESC"
     total = db.query_one("SELECT COUNT(*) AS c FROM requirements r WHERE " + where, args)["c"]
     rows = db.query(
-        """SELECT r.*, m.name AS module_name FROM requirements r
+        """SELECT r.*, m.name AS module_name, v.name AS version_name FROM requirements r
            LEFT JOIN modules m ON m.id=r.module_id
+           LEFT JOIN versions v ON v.id=r.version_id
            WHERE """ + where + " ORDER BY r." + sort_col + " " + direction + " LIMIT ? OFFSET ?",
         args + [size, (page - 1) * size],
     )
@@ -255,6 +279,7 @@ class RequirementBody(BaseModel):
     title: str
     description: str = ""
     module_id: int | None = None
+    version_id: int | None = None
     req_type: str = "新需求"
     urgency: str = "中"
     source_objects: list[str] = []
@@ -287,15 +312,15 @@ def create_requirement(body: RequirementBody, user=Depends(current_user)):
 
 @router.get("/requirements/export")
 def export_requirements(keyword: str = "", module_id: int = 0, req_type: str = "", status: str = "",
-                        urgency: str = "", user=Depends(current_user)):
-    data = requirements(keyword, module_id, req_type, status, urgency, "", "", "", "", "updated_at", "desc", 1, 10000, user)
+                        urgency: str = "", version_id: int = 0, user=Depends(current_user)):
+    data = requirements(keyword, module_id, req_type, status, urgency, "", "", version_id, "", "", "updated_at", "desc", 1, 10000, user)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["需求编号", "标题", "描述", "所属模块", "类型", "紧急度", "状态", "来源", "期望时间", "提出次数", "创建人", "创建时间", "更新时间"])
+    writer.writerow(["需求编号", "标题", "描述", "所属模块", "类型", "紧急度", "状态", "版本号", "来源", "期望时间", "提出次数", "创建人", "创建时间", "更新时间"])
     labels = pipeline.REQ_STATUS_LABELS
     for r in data["items"]:
         writer.writerow([r["req_no"], r["title"], r["description"], r["module_name"] or "", r["req_type"], r["urgency"],
-                         labels.get(r["status"], r["status"]), "、".join(r["source_objects"]), r["expect_time"],
+                         labels.get(r["status"], r["status"]), r.get("version_name") or "", "、".join(r["source_objects"]), r["expect_time"],
                          r["freq"], r["created_by"], r["created_at"], r["updated_at"]])
     content = "﻿" + buf.getvalue()
     return StreamingResponse(iter([content.encode("utf-8-sig")]), media_type="text/csv",
@@ -305,8 +330,9 @@ def export_requirements(keyword: str = "", module_id: int = 0, req_type: str = "
 @router.get("/requirements/{req_id}")
 def requirement_detail(req_id: int, user=Depends(current_user)):
     req = db.query_one(
-        """SELECT r.*, m.name AS module_name FROM requirements r
-           LEFT JOIN modules m ON m.id=r.module_id WHERE r.id=?""",
+        """SELECT r.*, m.name AS module_name, v.name AS version_name FROM requirements r
+           LEFT JOIN modules m ON m.id=r.module_id
+           LEFT JOIN versions v ON v.id=r.version_id WHERE r.id=?""",
         (req_id,),
     )
     if not req:
@@ -317,7 +343,54 @@ def requirement_detail(req_id: int, user=Depends(current_user)):
         req["source_objects"] = []
     req["evidences"] = _attach_display_names(db.query("SELECT * FROM evidences WHERE requirement_id=? ORDER BY id", (req_id,)))
     req["transitions"] = db.query("SELECT * FROM transitions WHERE requirement_id=? ORDER BY id", (req_id,))
+    card_ids = [e["card_id"] for e in req["evidences"] if e.get("card_id")]
+    if card_ids:
+        marks = ",".join("?" * len(card_ids))
+        req["attachments"] = db.query(
+            "SELECT id,user,msg_type,filename,size,created_at FROM attachments WHERE requirement_id=? OR (requirement_id IS NULL AND card_id IN (%s)) ORDER BY id" % marks,
+            (req_id,) + tuple(card_ids),
+        )
+    else:
+        req["attachments"] = db.query(
+            "SELECT id,user,msg_type,filename,size,created_at FROM attachments WHERE requirement_id=? ORDER BY id",
+            (req_id,),
+        )
     return req
+
+
+@router.post("/requirements/{req_id}/attachments")
+async def upload_requirement_attachment(req_id: int, file: UploadFile = File(...), user=Depends(current_user)):
+    data = await file.read()
+    ok, msg = pipeline.save_requirement_attachment(user["name"], req_id, file.filename, data)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "message": msg}
+
+
+@router.delete("/attachments/{att_id}")
+def delete_attachment(att_id: int, user=Depends(require_roles("leader", "admin"))):
+    att = db.query_one("SELECT * FROM attachments WHERE id=?", (att_id,))
+    if not att:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    db.execute("DELETE FROM attachments WHERE id=?", (att_id,))
+    path = Path(DATA_DIR) / "uploads" / (att["stored_name"] or "")
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+    return {"ok": True}
+
+
+@router.get("/attachments/{att_id}/download")
+def download_attachment(att_id: int, user=Depends(current_user)):
+    att = db.query_one("SELECT * FROM attachments WHERE id=?", (att_id,))
+    if not att:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    path = Path(DATA_DIR) / "uploads" / (att["stored_name"] or "")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="附件文件已丢失")
+    return FileResponse(str(path), filename=att["filename"] or "attachment")
 
 
 @router.put("/requirements/{req_id}")
@@ -327,10 +400,12 @@ def update_requirement(req_id: int, body: RequirementBody, user=Depends(current_
         raise HTTPException(status_code=404, detail="需求不存在")
     if not body.title.strip():
         raise HTTPException(status_code=400, detail="标题必填")
+    if body.version_id and not db.query_one("SELECT id FROM versions WHERE id=?", (body.version_id,)):
+        raise HTTPException(status_code=400, detail="版本号不存在，请先在系统管理中配置")
     db.execute(
-        """UPDATE requirements SET title=?, description=?, module_id=?, req_type=?, urgency=?,
+        """UPDATE requirements SET title=?, description=?, module_id=?, version_id=?, req_type=?, urgency=?,
            source_objects=?, expect_time=?, updated_at=? WHERE id=?""",
-        (body.title.strip(), body.description, body.module_id, body.req_type, body.urgency,
+        (body.title.strip(), body.description, body.module_id, body.version_id, body.req_type, body.urgency,
          json.dumps(body.source_objects, ensure_ascii=False), body.expect_time, db.now(), req_id),
     )
     db.execute(
@@ -353,6 +428,7 @@ def delete_requirement(req_id: int, user=Depends(require_roles("leader", "admin"
 class TransitionBody(BaseModel):
     to_status: str
     reason: str = ""
+    version_id: int | None = None
 
 
 @router.post("/requirements/{req_id}/transition")
@@ -361,16 +437,26 @@ def transition_requirement(req_id: int, body: TransitionBody, user=Depends(requi
     if not req:
         raise HTTPException(status_code=404, detail="需求不存在")
     allowed = {"confirmed": ["assessing", "rejected"], "assessing": ["scheduled", "rejected"],
-               "scheduled": ["released", "rejected"], "released": [], "rejected": []}
+               "scheduled": ["developing", "rejected"], "developing": ["released", "rejected"], "released": [], "rejected": []}
     if body.to_status not in allowed.get(req["status"], []):
         raise HTTPException(status_code=400, detail="当前状态不允许流转到目标状态")
     if body.to_status == "rejected" and not body.reason.strip():
         raise HTTPException(status_code=400, detail="流转为已拒绝必须填写拒绝原因")
-    db.execute("UPDATE requirements SET status=?, reject_reason=?, updated_at=? WHERE id=?",
-               (body.to_status, body.reason if body.to_status == "rejected" else req["reject_reason"], db.now(), req_id))
+    reason = body.reason
+    version_id = req.get("version_id")
+    if body.to_status == "scheduled":
+        if not body.version_id:
+            raise HTTPException(status_code=400, detail="流转为已排期必须选择版本号")
+        version = db.query_one("SELECT * FROM versions WHERE id=? AND status='启用'", (body.version_id,))
+        if not version:
+            raise HTTPException(status_code=400, detail="版本号不存在或已停用，请先在系统管理中配置")
+        version_id = version["id"]
+        reason = ("排期版本：" + version["name"] + ("；" + body.reason if body.reason.strip() else "")).strip("；")
+    db.execute("UPDATE requirements SET status=?, reject_reason=?, version_id=?, updated_at=? WHERE id=?",
+               (body.to_status, body.reason if body.to_status == "rejected" else req["reject_reason"], version_id, db.now(), req_id))
     db.execute(
         "INSERT INTO transitions(requirement_id,from_status,to_status,operator,reason,created_at) VALUES(?,?,?,?,?,?)",
-        (req_id, req["status"], body.to_status, user["name"], body.reason, db.now()),
+        (req_id, req["status"], body.to_status, user["name"], reason, db.now()),
     )
     if body.to_status == "released":
         req = db.query_one("SELECT * FROM requirements WHERE id=?", (req_id,))

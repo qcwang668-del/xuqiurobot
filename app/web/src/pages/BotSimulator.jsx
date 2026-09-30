@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Button, Card, Col, Input, Row, Select, Space, Tag, Typography, message } from 'antd'
-import { SendOutlined } from '@ant-design/icons'
-import api from '../api'
+import { Button, Card, Col, Input, Row, Select, Space, Tag, Typography, Upload, message } from 'antd'
+import { PaperClipOutlined, SendOutlined } from '@ant-design/icons'
+import api, { AI_TIMEOUT } from '../api'
 
 export default function BotSimulator() {
   const [user, setUser] = useState('王雁')
@@ -32,7 +32,7 @@ export default function BotSimulator() {
     if (!input.trim()) return
     setSending(true)
     try {
-      await api.post('/simulate/message', { user, text: input.trim() })
+      await api.post('/simulate/message', { user, text: input.trim() }, { timeout: AI_TIMEOUT })
       setInput('')
       load()
     } catch (e) {
@@ -40,6 +40,25 @@ export default function BotSimulator() {
     } finally {
       setSending(false)
     }
+  }
+
+  const uploadProps = {
+    showUploadList: false,
+    accept: '.png,.jpg,.jpeg,.gif,.bmp,.webp,.docx,.pdf,.xlsx,.xls,.csv,.txt,.md',
+    customRequest: async ({ file, onSuccess, onError }) => {
+      const form = new FormData()
+      form.append('user_name', user)
+      form.append('file', file)
+      try {
+        await api.post('/simulate/file', form, { timeout: AI_TIMEOUT })
+        message.success('附件已提交')
+        onSuccess()
+        load()
+      } catch (e) {
+        message.error(e.message)
+        onError(e)
+      }
+    },
   }
 
   return (
@@ -73,6 +92,9 @@ export default function BotSimulator() {
           <Space.Compact style={{ width: '100%', marginTop: 12 }}>
             <Input value={input} onChange={(e) => setInput(e.target.value)} onPressEnter={send}
               placeholder="输入需求内容，或回复 确认 / 修改：意见 / 忽略 / 合并 / 新建 / 帮助" />
+            <Upload {...uploadProps}>
+              <Button icon={<PaperClipOutlined />}>附件</Button>
+            </Upload>
             <Button type="primary" icon={<SendOutlined />} loading={sending} onClick={send}>发送</Button>
           </Space.Compact>
         </Card>
@@ -93,6 +115,9 @@ export default function BotSimulator() {
           </Typography.Paragraph>
           <Typography.Paragraph>
             <Tag>合并/新建</Tag>检测到相似需求时，回复「合并」或「新建」。
+          </Typography.Paragraph>
+          <Typography.Paragraph>
+            <Tag>附件</Tag>支持图片及 Word/PDF/Excel 等附件，随需求一并入池（附件内容不做分析）。
           </Typography.Paragraph>
           <Typography.Paragraph type="secondary">
             模拟器用于本地联调，消息流与真实企微机器人一致；接入真实机器人后在企微会话中按同样指令操作。

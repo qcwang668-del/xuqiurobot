@@ -1,7 +1,11 @@
 import json
+import re
+import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import bot, db, llm, masking
+from .config import DATA_DIR
 from .similarity import find_similar
 
 CONFIRM_WORDS = {"确认", "确认入池", "确定", "ok", "OK"}
@@ -15,6 +19,7 @@ REQ_STATUS_LABELS = {
     "confirmed": "已确认",
     "assessing": "评估中",
     "scheduled": "已排期",
+    "developing": "开发中",
     "released": "已上线",
     "rejected": "已拒绝",
 }
@@ -26,7 +31,115 @@ def _parse_time(text):
 
 def handle_non_text(user, msg_type):
     db.log_bot_message("in", user, msg_type, "<非文本消息>")
-    bot.send_user_message(user, "本期暂支持文字提报，请将需求以文字形式发送")
+    bot.send_user_message(user, "暂不支持该类型消息，请以文字描述需求，可附带图片或 Word/PDF/Excel 附件。")
+
+
+UPLOAD_DIR = Path(DATA_DIR) / "uploads"
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+DOC_EXTS = {".docx", ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".md"}
+MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024
+MAX_ATTACHMENTS = 10
+
+
+def _validate_attachment(filename, data):
+    ext = _attachment_ext(filename)
+    if ext not in IMAGE_EXTS | DOC_EXTS:
+        return None, "不支持的附件格式 %s，支持图片及 Word/PDF/Excel/CSV/TXT。" % (ext or "未知")
+    if not data:
+        return None, "附件内容为空"
+    if len(data) > MAX_ATTACHMENT_SIZE:
+        return None, "附件超过 20MB 大小限制"
+    return ext, ""
+
+
+def _store_attachment_file(filename, data):
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r'[\\/:*?"<>|\r\n]', "_", filename)
+    stored_name = "%s_%s" % (uuid.uuid4().hex[:12], safe_name)
+    (UPLOAD_DIR / stored_name).write_bytes(data)
+    return stored_name
+
+
+def save_requirement_attachment(user, req_id, filename, data):
+    """需求详情页手动新增附件，归属到需求。返回 (ok, message)。"""
+    req = db.query_one("SELECT id FROM requirements WHERE id=?", (req_id,))
+    if not req:
+        return False, "需求不存在"
+    ext, err = _validate_attachment(filename, data)
+    if err:
+        return False, err
+    count = db.query_one(
+        """SELECT COUNT(*) AS c FROM attachments
+           WHERE requirement_id=? OR (requirement_id IS NULL AND card_id IN
+             (SELECT card_id FROM evidences WHERE requirement_id=? AND card_id IS NOT NULL))""",
+        (req_id, req_id),
+    )["c"]
+    if count >= MAX_ATTACHMENTS:
+        return False, "附件数量已达 %d 个上限" % MAX_ATTACHMENTS
+    msg_type = "image" if ext in IMAGE_EXTS else "file"
+    stored_name = _store_attachment_file(filename, data)
+    db.save_attachment(user, msg_type, filename, stored_name, len(data), requirement_id=req_id)
+    return True, "附件已添加"
+
+
+def save_card_attachment(user, card_id, filename, data):
+    """卡片详情页手动新增附件，归属到卡片。返回 (ok, message)。"""
+    card = db.query_one("SELECT id FROM cards WHERE id=?", (card_id,))
+    if not card:
+        return False, "卡片不存在"
+    ext, err = _validate_attachment(filename, data)
+    if err:
+        return False, err
+    count = db.query_one("SELECT COUNT(*) AS c FROM attachments WHERE card_id=?", (card_id,))["c"]
+    if count >= MAX_ATTACHMENTS:
+        return False, "附件数量已达 %d 个上限" % MAX_ATTACHMENTS
+    msg_type = "image" if ext in IMAGE_EXTS else "file"
+    stored_name = _store_attachment_file(filename, data)
+    db.save_attachment(user, msg_type, filename, stored_name, len(data), card_id=card_id)
+    return True, "附件已添加"
+
+
+def _attachment_ext(filename):
+    name = (filename or "").lower()
+    dot = name.rfind(".")
+    return name[dot:] if dot >= 0 else ""
+
+
+def handle_attachment(user, msg_type, filename, data, source="mock", chat_id=None):
+    """附件（图片/文档/表格）只做存储与卡片关联，不做内容解析。返回 (ok, message)。"""
+    if source == "wecom":
+        user = bot.maybe_resolve_sender(user)
+    card = db.query_one(
+        "SELECT * FROM cards WHERE source_user=? AND status='pending' ORDER BY id DESC LIMIT 1",
+        (user,),
+    )
+    if msg_type == "image" and _attachment_ext(filename) not in IMAGE_EXTS:
+        filename = (filename or "图片") + ".jpg"
+    if not filename:
+        filename = ("图片" if msg_type == "image" else "附件") + "_" + db.now().replace(" ", "_").replace(":", "")
+    ext, err = _validate_attachment(filename, data)
+    if err:
+        bot.send_user_message(user, err, chat_id=chat_id)
+        return False, err
+    if card:
+        count = db.query_one("SELECT COUNT(*) AS c FROM attachments WHERE card_id=?", (card["id"],))["c"]
+    else:
+        count = db.query_one("SELECT COUNT(*) AS c FROM attachments WHERE card_id IS NULL AND user=?", (user,))["c"]
+    if count >= MAX_ATTACHMENTS:
+        bot.send_user_message(user, "附件数量已达 %d 个上限，无法继续添加《%s》。" % (MAX_ATTACHMENTS, filename), chat_id=chat_id)
+        return False, "附件数量已达上限"
+    stored_name = _store_attachment_file(filename, data)
+    att_id = db.save_attachment(user, msg_type, filename, stored_name, len(data), card_id=card["id"] if card else None)
+    db.log_bot_message("in", user, msg_type, "【附件】%s" % filename)
+    if card:
+        bot.send_user_message(user, "已收到附件《%s》，已关联到您的需求卡片 #%d。" % (filename, card["id"]), chat_id=chat_id)
+        return True, "已关联卡片 #%d" % card["id"]
+    buf = db.query_one("SELECT * FROM buffers WHERE user=? AND processed=0 ORDER BY id DESC LIMIT 1", (user,))
+    if buf:
+        bot.send_user_message(user, "已收到附件《%s》，将随您本次提交的需求一并入池。" % filename, chat_id=chat_id)
+    else:
+        bot.send_user_message(user, "已收到附件《%s》，请再补充一段文字描述您的需求，附件将随需求一并提交。" % filename, chat_id=chat_id)
+    return True, "附件已保存"
 
 
 def handle_incoming(user, text, source="mock", chat_id=None):
@@ -96,6 +209,7 @@ def finalize_buffer(buf):
            VALUES(?,?,?,'pending',?,?,?)""",
         (user, raw, masked, buf.get("chat_id"), now, now),
     )
+    db.execute("UPDATE attachments SET card_id=? WHERE card_id IS NULL AND user=?", (card_id, user))
     try:
         result = llm.extract(masked, card_id=card_id)
     except llm.LLMError:
@@ -182,8 +296,14 @@ def modify_card(card_id, user, instruction):
 def _next_req_no():
     day = datetime.now().strftime("%Y%m%d")
     prefix = "XQ-%s-" % day
-    row = db.query_one("SELECT COUNT(*) AS c FROM requirements WHERE req_no LIKE ?", (prefix + "%",))
-    return prefix + "%03d" % ((row["c"] if row else 0) + 1)
+    row = db.query_one("SELECT MAX(req_no) AS m FROM requirements WHERE req_no LIKE ?", (prefix + "%",))
+    seq = 0
+    if row and row["m"]:
+        try:
+            seq = int(str(row["m"]).rsplit("-", 1)[-1])
+        except ValueError:
+            seq = 0
+    return prefix + "%03d" % (seq + 1)
 
 
 def _append_source(existing_json, source):
@@ -272,6 +392,7 @@ def _create_requirement(card, operator):
         "INSERT INTO transitions(requirement_id,from_status,to_status,operator,reason,created_at) VALUES(?,?,?,?,?,?)",
         (req_id, None, "confirmed", operator, "确认入池", now),
     )
+    db.execute("UPDATE attachments SET requirement_id=? WHERE card_id=?", (req_id, card["id"]))
     return db.query_one("SELECT * FROM requirements WHERE id=?", (req_id,))
 
 
@@ -291,6 +412,7 @@ def _merge_into(card, target, operator):
     )
     db.execute("UPDATE cards SET status='confirmed', pending_action='none', confirmed_at=?, updated_at=? WHERE id=?",
                (now, now, card["id"]))
+    db.execute("UPDATE attachments SET requirement_id=? WHERE card_id=?", (target["id"], card["id"]))
     bot.send_user_message(
         card["source_user"],
         "您提交的需求已合并至 %s（%s），提出次数+1。" % (target["req_no"], target["title"] or ""),
