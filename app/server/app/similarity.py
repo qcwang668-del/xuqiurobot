@@ -10,8 +10,9 @@ def _ratio(a, b):
 
 
 def _shortlist(title, description, limit=5):
+    placeholders = ",".join("?" for _ in OPEN_STATUSES)
     rows = db.query(
-        "SELECT id, req_no, title, description, status FROM requirements WHERE status IN (?,?,?)",
+        f"SELECT id, req_no, title, description, status FROM requirements WHERE status IN ({placeholders})",
         OPEN_STATUSES,
     )
     target = (title or "") + (description or "")
